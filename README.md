@@ -7,7 +7,7 @@ ThinkPHP6.0 短信验证码扩展
 ## 安装
 
 ~~~php
-composer require axguowen/think-sms
+composer require axguowen/think-smscode
 ~~~
 
 ## 用法示例
