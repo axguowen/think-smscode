@@ -115,7 +115,7 @@ class Smscode
     public function create($mobile)
     {
         // 初始化错误信息
-        $this->initErrorInfo();
+        $this->initError();
         // 读取发送缓存
         $smscodeSended = $this->cache->get($mobile . '_sended');
         // 如果60秒内已发送过
