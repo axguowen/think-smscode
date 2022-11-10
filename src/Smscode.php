@@ -362,6 +362,10 @@ class Smscode
         if(!isset($cacheStoreConfig['type']) || $cacheStoreConfig['type'] != 'File'){
             return false;
         }
+        // 如果目录不存在则返回
+        if(!is_dir($cacheStoreConfig['path'])){
+            return false;
+        }
         $files = $this->findFiles($cacheStoreConfig['path'], function (SplFileInfo $item) use ($lifetime, $now) {
             return $now - $lifetime > $item->getMTime();
         });
