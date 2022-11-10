@@ -18,7 +18,7 @@ think-sms的具体配置请参考：
 
 https://github.com/axguowen/think-sms
 
-注意：短信验证码数据存储基于Session，需要thinkphp开启Session中间件才能使用。
+注意：V1.1版本开始短信验证码数据存储基于Cache, 方便前后端分离应用
 
 本扩展包的使用说明如下：
 
@@ -30,8 +30,14 @@ https://github.com/axguowen/think-sms
 
 use axguowen\facade\Smscode;
 
-// 发送短信验证码, 发送成功返回true
-$createStatus = Smscode::create('188****8888');
+// 生成发送短信验证码
+$smscode = Smscode::create($tel);
+// 获取发送状态, 成功返回true, 失败返回false;
+$sendStatus = $smscode->getSendStatus();
+// 如果失败则可以获取错误信息
+if(false == $sendStatus){
+    echo $smscode->getErrorMsg();
+}
 
 ~~~
 

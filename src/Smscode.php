@@ -11,9 +11,13 @@
 
 namespace axguowen;
 
+use Closure;
+use FilesystemIterator;
+use SplFileInfo;
+use Generator;
+use think\facade\App;
 use think\facade\Config;
-use think\facade\Session;
-use think\facade\Request;
+use think\facade\Cache;
 use axguowen\facade\Sms;
 
 /**
@@ -22,6 +26,12 @@ use axguowen\facade\Sms;
  */
 class Smscode
 {
+    /**
+     * 缓存句柄
+     * @var Cache
+     */
+    protected $cache;
+
     /**
      * 配置参数
      * @var array
@@ -37,66 +47,87 @@ class Smscode
         'platforms' => [],
     ];
 
+    /**
+     * 发送状态
+     * @var bool
+     */
+    protected $sendStatus = false;
+
+    /**
+     * 错误信息
+     * @var string
+     */
+    protected $errorMsg = '';
+
+    /**
+     * 短信验证码
+     * @var string
+     */
+    protected $code = '';
+
 	/**
      * 架构函数
      * @access public
-     * @param array $app 应用对象
+     * @param  array $options 配置
      */
     public function __construct()
     {
-        // 获取配置
-        $this->setConfig(Config::get('smscode', []));
-    }
-
-    /**
-     * 获取配置
-     * @access public
-     * @param  string $name 配置名称
-     * @return array
-     */
-    public function config($name = null)
-    {
-        // 未指定配置项
-        if (is_null($name)) {
-            // 返回全部配置
-            return $this->options;
-        }
-        // 存在指定的配置项
-        if(isset($this->options[$name])){
-            return $this->options[$name];
-        }
-        // 指定的配置项不存在
-        return null;
-    }
-
-    /**
-     * 设置配置
-     * @access public
-     * @param  array $options 配置参数
-     * @return $this
-     */
-    public function setConfig($options)
-    {
+        // 获取配置参数
+        $options = Config::get('smscode', []);
         // 合并配置参数
         $this->options = array_merge($this->options, $options);
-        // 返回
-        return $this;
+        // 初始化
+        $this->init();
     }
 
     /**
-     * 发送验证码并把验证码的值保存到session中
+     * 初始化
+     * @access protected
+     * @return void
+     */
+    protected function init($name = null)
+    {
+        // 获取缓存配置
+        $cacheConfig = Config::get('cache');
+        // 增加缓存类型配置
+        $cacheConfig['stores']['smscode'] = [
+            // 驱动方式
+            'type' => 'File',
+            // 缓存保存目录
+            'path' => App::getRuntimePath() . 'cache' . DIRECTORY_SEPARATOR . 'smscode',
+            // 缓存有效期
+            'expire' => $this->options['expire'],
+        ];
+        // 更新缓存配置
+        Config::set($cacheConfig, 'cache');
+        // 实例化缓存句柄
+        $this->cache = Cache::store('smscode');
+        // 缓存垃圾回收
+        $this->cacheClear();
+    }
+
+    /**
+     * 发送验证码
      * @access public
      * @param string $mobile 手机号
      * @return bool
      */
     public function create($mobile)
     {
+        // 初始化错误信息
+        $this->initErrorInfo();
+        // 读取发送缓存
+        $smscodeSended = $this->cache->get($mobile . '_sended');
+        // 如果60秒内已发送过
+        if($smscodeSended){
+            return $this->setSendFailed('短信发送过于频繁');
+        }
+
+        $sendSuccess = false;
         // 生成验证码
         $code = $this->makeCode();
         // 获取可用的平台
         $platforms = $this->platforms();
-        // 验证码发送状态
-        $sendStatus = false;
         // 遍历平台发送验证码
         foreach($platforms as $name => $platform){
             // 模板ID
@@ -113,16 +144,19 @@ class Smscode
             // 获取短信平台驱动并发送短信
             if(Sms::platform($name)->setMobiles($mobile)->send($data, $templateId)){
                 // 改变状态
-                $sendStatus = true;
-                // 写入数据到Session
-                Session::set('smscode.mobile', $mobile);
-                Session::set('smscode.code', $code);
-                Session::set('smscode.expire', Request::time() + $this->options['expire']);
+                $sendSuccess = true;
+                // 写入数据到缓存
+                $this->saveCache($mobile, $code);
                 // 结束循环
                 break;
             }
         }
-        return $sendStatus;
+        // 如果发送成功
+        if($sendSuccess){
+            return $this->setSendSuccess($code);
+        }
+        // 返回失败
+        return $this->setSendFailed('短信发送失败');
     }
 
     /**
@@ -134,34 +168,88 @@ class Smscode
      */
     public function validate($mobile, $code)
     {
-        // Session数据不存在
-        if (!Session::has('smscode')) {
+        // 获取缓存中的验证码
+        $codeInCache = $this->cache->get($mobile . '_code');
+        // 验证错误
+        if($codeInCache != $code){
             return false;
         }
-        // 对比手机号
-        $smscodeMobile = Session::get('smscode.mobile');
-        if($smscodeMobile != $mobile){
-            return false;
-        }
-        // 对比验证码
-        $smscodeCode = Session::get('smscode.code');
-        if($smscodeCode != $code){
-            return false;
-        }
-        // 对比时间
-        $smscodeExpire = Session::get('smscode.expire');
-        if(Request::time() > $smscodeExpire){
-            return false;
-        }
-        // 删除
-        Session::delete('smscode');
+        // 删除缓存
+        $this->deleteCache($mobile);
         // 验证成功
         return true;
     }
 
     /**
-     * 生成验证码
+     * 是否发送成功
      * @access public
+     * @return bool
+     */
+    public function getSendStatus()
+    {
+        return $this->sendStatus;
+    }
+
+    /**
+     * 获取错误信息
+     * @access public
+     * @return string
+     */
+    public function getErrorMsg()
+    {
+        return $this->errorMsg;
+    }
+
+    /**
+     * 获取发送的短信
+     * @access public
+     * @return string
+     */
+    public function getCode()
+    {
+        return $this->code;
+    }
+
+    /**
+     * 通过token获取手机号
+     * @access public
+     * @param string $smstoken 令牌
+     * @return string
+     */
+    public function getMobileByToken($smstoken)
+    {
+        return $this->cache->get($smstoken);
+    }
+
+    /**
+     * 设置手机号token的缓存
+     * @access public
+     * @param string $smstoken 令牌
+     * @param string $mobile 手机号
+     * @return void
+     */
+    public function setTokenCache($smstoken, $mobile)
+    {
+        $this->cache->set($smstoken, $mobile);
+    }
+
+    /**
+     * 通过手机号构造token
+     * @access public
+     * @param string $mobile 手机号
+     * @return string
+     */
+    public function makeMobileToken($mobile)
+    {
+        // 构造token
+        $smstoken = md5($mobile . time());
+        $this->cache->set($smstoken, $mobile);
+        return $smstoken;
+    }
+
+    /**
+     * 生成验证码
+     * @access protected
      * @return string
      */
     protected function makeCode()
@@ -179,7 +267,7 @@ class Smscode
 
     /**
      * 构建可用的平台数组
-     * @access public
+     * @access protected
      * @return array
      */
     protected function platforms()
@@ -228,4 +316,144 @@ class Smscode
         // 返回
         return $randPlatforms;
     }
+
+    /**
+     * 写入缓存
+     * @access protected
+     * @param  string $mobile 手机号
+     * @param  string $code 验证码
+     * @return void
+     */
+    protected function saveCache($mobile, $code)
+    {
+        // 存储验证码
+        $this->cache->set($mobile . '_code', $code);
+        // 存储已发送状态
+        $this->cache->set($mobile . '_sended', '1', 60);
+    }
+
+    /**
+     * 删除缓存缓存
+     * @access protected
+     * @param  string $mobile 手机号
+     * @return void
+     */
+    protected function deleteCache($mobile)
+    {
+        // 删除验证码缓存
+        $this->cache->delete($mobile . '_code');
+        // 删除已发送状态缓存
+        // $this->cache->delete($mobile . '_sended');
+    }
+
+    /**
+     * 缓存垃圾回收
+     * @access protected
+     * @return void
+     */
+    protected function cacheClear()
+    {
+        $lifetime = $this->options['expire'];
+        $now      = time();
+
+        // 获取当前配置
+        $cacheStoreConfig = Cache::getStoreConfig('smscode');
+        // 如果不是文件类型
+        if(!isset($cacheStoreConfig['type']) || $cacheStoreConfig['type'] != 'File'){
+            return false;
+        }
+        $files = $this->findFiles($cacheStoreConfig['path'], function (SplFileInfo $item) use ($lifetime, $now) {
+            return $now - $lifetime > $item->getMTime();
+        });
+
+        foreach ($files as $file) {
+            $this->unlink($file->getPathname());
+        }
+    }
+
+    /**
+     * 查找文件
+     * @access protected
+     * @param string  $root
+     * @param Closure $filter
+     * @return Generator
+     */
+    protected function findFiles($root, Closure $filter)
+    {
+        $items = new FilesystemIterator($root);
+        
+        /** @var SplFileInfo $item */
+        foreach ($items as $item) {
+            if ($item->isDir() && !$item->isLink()) {
+                // PHP7 写法
+                // yield from $this->findFiles($item->getPathname(), $filter);
+
+                //*/ PHP5.6 兼容写法
+                $files = $this->findFiles($item->getPathname(), $filter);
+                foreach ($files as $file) {
+                    $this->unlink($file->getPathname());
+                }
+                //*/
+                
+            } else {
+                if ($filter($item)) {
+                    yield $item;
+                }
+            }
+        }
+    }
+
+    /**
+     * 判断文件是否存在后，删除
+     * @access protected
+     * @param string $file
+     * @return bool
+     */
+    protected function unlink($file)
+    {
+        return is_file($file) && unlink($file);
+    }
+
+    /**
+     * 初始化错误信息
+     * @access protected
+     * @return void
+     */
+    protected function initError()
+    {
+        $this->sendStatus = false;
+        $this->errorMsg = '';
+        $this->code = '';
+    }
+
+    /**
+     * 发送失败
+     * @access protected
+     * @param string $msg 错误信息
+     * @return $this
+     */
+    protected function setSendFailed($msg = '')
+    {
+        $this->sendStatus = false;
+        $this->errorMsg = $msg;
+        $this->code = '';
+        // 返回
+        return $this;
+    }
+
+    /**
+     * 发送成功
+     * @access protected
+     * @param string $code 短信验证码
+     * @return $this
+     */
+    protected function setSendSuccess($code)
+    {
+        $this->sendStatus = true;
+        $this->errorMsg = '';
+        $this->code = $code;
+        // 返回
+        return $this;
+    }
+
 }
