@@ -68,7 +68,6 @@ class Smscode
 	/**
      * 架构函数
      * @access public
-     * @param  array $options 配置
      */
     public function __construct()
     {
